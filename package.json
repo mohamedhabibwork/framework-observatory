@@ -31,6 +31,9 @@
     "@framework/events": "workspace:*",
     "@framework/http": "workspace:*",
     "@framework/logging": "workspace:*",
+    "@framework/mail": "workspace:*",
+    "@framework/queue": "workspace:*",
+    "@framework/validation": "workspace:*",
     "drizzle-orm": "0.45.4",
     "hono": "4.13.13",
     "zod": "4.6.7"
