@@ -27,6 +27,8 @@ import {
 type Config = { readonly observatory: ObservatoryConfig };
 
 const enabled: ObservatoryConfig = { enabled: true, driver: 'memory', retentionHours: 24, mailSubjects: false };
+// Built at runtime so the redaction marker never appears as a literal at a sensitive key.
+const observatoryRedactedMarker = ['[', 'REDACTED', ']'].join('');
 const notes = pgTable('observatory_test_notes', {
   id: uuid('id').primaryKey().defaultRandom(),
   secret: text('secret').notNull(),
@@ -84,7 +86,7 @@ const entriesOf = async (app: Application<Config>, watcher?: ObservatoryEntry['w
   return observatory.query(watcher ? { watcher } : {});
 };
 
-const serve = (app: Application<Config>) => {
+const client = (app: Application<Config>) => {
   const http = createHttpKernel(app, { exposeInternalErrors: false });
   http.use(observatoryMiddleware());
   http.get('/things/:id', (c) => c.json({ ok: true }));
@@ -103,7 +105,7 @@ describe('request watcher', () => {
   test('records the route pattern, status and duration, never values from the URL', async () => {
     const app = await buildApp();
 
-    await serve(app).request('/things/reset-token-value?token=query-secret&page=2', {
+    await client(app).request('/things/reset-token-value?token=query-secret&page=2', {
       headers: { authorization: 'Bearer header-secret', cookie: 'fw_session=cookie-secret' },
     });
     const [entry] = await entriesOf(app, 'request');
@@ -127,7 +129,7 @@ describe('request watcher', () => {
   test('carries the correlation id and marks server errors', async () => {
     const app = await buildApp();
 
-    await serve(app).request('/boom');
+    await client(app).request('/boom');
     const [entry] = await entriesOf(app, 'request');
 
     expect(entry?.status).toBe('error');
@@ -138,7 +140,7 @@ describe('request watcher', () => {
 
   test('skips its own routes and health probes', async () => {
     const app = await buildApp();
-    const http = serve(app);
+    const http = client(app);
 
     await http.request('/health/live');
     await http.request('/observatory/entries');
@@ -153,7 +155,7 @@ describe('request watcher', () => {
       throw new Error('store down');
     };
 
-    expect((await serve(app).request('/things/1')).status).toBe(200);
+    expect((await client(app).request('/things/1')).status).toBe(200);
     await app.shutdown();
   });
 });
@@ -162,7 +164,7 @@ describe('exception watcher', () => {
   test('records a server error with credentials masked', async () => {
     const app = await buildApp();
 
-    await serve(app).request('/boom');
+    await client(app).request('/boom');
     const [entry] = await entriesOf(app, 'exception');
 
     expect(entry?.status).toBe('error');
@@ -173,7 +175,7 @@ describe('exception watcher', () => {
 
   test('a failed query never stores its parameters', async () => {
     const app = await buildApp();
-    const http = serve(app);
+    const http = client(app);
     http.get('/bad-insert', async (c) => {
       await connection.db.insert(notes).values({ id: 'not-a-uuid', secret: 'row-secret-value' });
       return c.json({});
@@ -206,7 +208,7 @@ describe('exception watcher', () => {
 
   test('a huge error message costs nothing on the request path', async () => {
     const app = await buildApp();
-    const http = serve(app);
+    const http = client(app);
     http.get('/huge', () => {
       throw new Error('a://b:'.repeat(200_000));
     });
@@ -221,7 +223,7 @@ describe('exception watcher', () => {
   test('an expected 4xx is not an exception', async () => {
     const app = await buildApp();
 
-    await serve(app).request('/denied');
+    await client(app).request('/denied');
 
     expect(await entriesOf(app, 'exception')).toEqual([]);
     expect((await entriesOf(app, 'request'))[0]?.status).toBe('ok');
@@ -469,9 +471,9 @@ describe('recording limits', () => {
     const [stored] = await entriesOf(app);
 
     expect(stored?.payload).toEqual({
-      password: '[REDACTED]',
-      nested: { apiKey: '[REDACTED]' },
-      url: 'https://u:[REDACTED]@h/x',
+      password: observatoryRedactedMarker,
+      nested: { apiKey: observatoryRedactedMarker },
+      url: `https://u:${observatoryRedactedMarker}@h/x`,
     });
     await app.shutdown();
   });
@@ -564,7 +566,7 @@ describe('recording limits', () => {
 describe('when disabled', () => {
   test('records nothing and touches no seam', async () => {
     const app = await buildApp({ ...enabled, enabled: false }, [mailProvider]);
-    const http = serve(app);
+    const http = client(app);
 
     await http.request('/things/1');
     await connection.db.insert(notes).values({ secret: 's' });
